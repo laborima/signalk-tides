@@ -200,4 +200,5 @@ The `registerResourceProvider()` call would be **replaced** by a `registerTidesP
 ## References
 
 - **Reference implementation:** <https://github.com/bkeepers/signalk-tides>
+- **Contributing PR:** <https://github.com/openwatersio/signalk-tides/pull/48>
 - **Weather API (model):** <https://demo.signalk.org/documentation/Developing/REST_APIs/Weather_API.html>

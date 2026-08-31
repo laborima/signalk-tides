@@ -16,6 +16,11 @@ export interface TideExtreme {
   time: string;
   value: number;
   type: TideExtremeType;
+  /**
+   * French tidal coefficient (20 = lowest neap, 120 = highest spring), when the
+   * source publishes it. Only carried on High water extremes.
+   */
+  coefficient?: number | null;
 }
 
 export interface TideForecastResult {
@@ -44,5 +49,6 @@ export type Config = {
   worldtidesApiKey?: string;
   stormglassApiKey?: string;
   localTidesPath?: string;
+  localTidesTimezone?: string;
   shomApiKey?: string;
 };
