@@ -24,7 +24,10 @@ import createSources from "./sources/index.js";
 export default function (app: SignalKApp): Plugin {
   // Interval to update tide data
   const defaultPeriod = 60; // 1 hour
+  // Minimum delay between two forecast fetches triggered by an exhausted cache.
+  const REFRESH_BACKOFF_MS = 15 * 60 * 1000;
   let unsubscribes: (() => void)[] = [];
+  let timers: NodeJS.Timeout[] = [];
 
   const sources = createSources(app);
 
@@ -64,6 +67,8 @@ export default function (app: SignalKApp): Plugin {
     stop() {
       unsubscribes.forEach((f) => f());
       unsubscribes = [];
+      timers.forEach((timer) => clearInterval(timer));
+      timers = [];
     },
   };
 
@@ -72,6 +77,7 @@ export default function (app: SignalKApp): Plugin {
 
     let lastForecast: TideForecastResult | null = null;
     let lastPosition: Position | null = null;
+    let lastRefreshAttempt = 0;
     const cache = new FileCache(app.getDataDirPath());
 
     // Use the selected source, or the first one if not specified
@@ -124,7 +130,8 @@ export default function (app: SignalKApp): Plugin {
 
     async function updatePosition() {
       lastPosition =
-        app.getSelfPath("navigation.position.value") || (await cache.get("position")) || null;
+        ((app.getSelfPath("navigation.position.value") ||
+          (await cache.get("position"))) as Position | undefined) || null;
 
       if (lastPosition) {
         await cache.set("position", lastPosition);
@@ -132,16 +139,17 @@ export default function (app: SignalKApp): Plugin {
       }
     }
 
-    async function updateForecast() {
+    async function updateForecast({ publish = true }: { publish?: boolean } = {}) {
       if (!lastPosition) {
         app.debug("No position available, cannot fetch tide data");
         return;
       }
 
+      lastRefreshAttempt = Date.now();
       try {
         lastForecast = await provider({ position: lastPosition });
         app.setPluginStatus("Updated tide forecast from " + source.title);
-        updateTides();
+        if (publish) await updateTides();
       } catch (e: unknown) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         app.setPluginError((e as any).message);
@@ -151,11 +159,33 @@ export default function (app: SignalKApp): Plugin {
     }
 
     async function updateTides(now = new Date()) {
-      if (!lastForecast) return;
+      if (!lastForecast) {
+        // Nothing cached yet (no position at startup, or the first fetch failed):
+        // keep trying rather than staying silent forever.
+        await updatePosition();
+        if (!lastForecast) return;
+      }
+
       // Get the next two upcoming extremes
-      const nextTides = lastForecast.extremes
+      let nextTides = lastForecast.extremes
         .filter(({ time }) => new Date(time) >= now)
         .slice(0, 2);
+
+      // The cached forecast has expired. Without this the plugin would keep
+      // publishing heightNow extrapolated from stale extremes and would never
+      // refresh timeHigh/timeLow again, because updateForecast() is otherwise
+      // only triggered by navigation.position deltas -- which never arrive on a
+      // fixed installation with no GPS.
+      // Rate-limited: if the source cannot supply future extremes (data files
+      // exhausted, API quota spent), this would otherwise re-fetch every minute.
+      if (nextTides.length < 2 && Date.now() - lastRefreshAttempt > REFRESH_BACKOFF_MS) {
+        app.debug("Forecast exhausted at " + now.toISOString() + ", refreshing");
+        await updateForecast({ publish: false });
+        if (!lastForecast) return;
+        nextTides = lastForecast.extremes
+          .filter(({ time }) => new Date(time) >= now)
+          .slice(0, 2);
+      }
 
       const delta: Delta = {
         context: ("vessels." + app.selfId) as Context,
@@ -188,8 +218,15 @@ export default function (app: SignalKApp): Plugin {
 
     // Perform initial update on startup after short delay to allow gnss position to be populated
     delay(4000).then(updatePosition);
-    // Update every minute
-    setInterval(updateTides, 60 * 1000);
+
+    // Refresh the forecast from the source on its own schedule. The
+    // navigation.position subscription only fires when the position changes, so
+    // a moored or land-based installation would otherwise never refresh.
+    const periodMs = (props.period ?? defaultPeriod) * 60 * 1000;
+    timers.push(setInterval(() => { void updatePosition(); }, periodMs));
+
+    // Publish the current height and the next extremes every minute
+    timers.push(setInterval(() => { void updateTides(); }, 60 * 1000));
   }
   function delay(time: number) {
     return new Promise((resolve) => setTimeout(resolve, time));
