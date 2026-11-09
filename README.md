@@ -82,6 +82,8 @@ With these sources:
 * the `tides` resource returns one GeoJSON feature per day, keyed `urn:mrn:signalk:uuid:tides:<station>:<YYYY-MM-DD>`, whose `properties.extremes` are `{ "type": "High", "value": 5.89, "time": "2026-11-09T15:22:00.000Z", "coefficient": 84 }`;
 * the Tides API routes and the web app still show Slackwater predictions.
 
+For every source, `period` (minutes, default 60) reloads the forecast on a schedule, so an installation without GPS keeps upcoming extremes.
+
 ### Chart plotter widget
 
 The plugin offers a tide widget to chart plotters that support Signal K [Plotter Extensions](https://github.com/SignalK/freeboard-sk/blob/master/docs/api/plotter-extensions-api.md), such as [Freeboard-SK](https://github.com/SignalK/freeboard-sk). It shows the tide at the vessel's position: the level now with its trend, and the next high or low water, on the predicted curve. Tapping it opens the full Tides app in a panel beside the chart.

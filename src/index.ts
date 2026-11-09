@@ -52,6 +52,8 @@ const UPDATE_INTERVAL = 60 * 1000; // 1 minute
 const API_PATH = "/signalk/v2/api/tides";
 const COMPENSATED_DEPTH_PATH = "environment.depth.belowChartDatum" as Path;
 const COEFFICIENT_PATH = "environment.tide.coefficient" as Path;
+// Minutes between two reloads of the forecast, whatever the position does
+const DEFAULT_REFRESH_PERIOD = 60;
 
 const TIDE_PATHS = [
   "environment.tide.stationName",
@@ -693,6 +695,15 @@ export default function (app: ServerAPI): Plugin {
     // Recompute the current height and next tides every minute
     const updateTimer = setInterval(updateTides, UPDATE_INTERVAL);
     unsubscribes.push(() => clearInterval(updateTimer));
+    // Reload the forecast on a schedule: without a GPS, or moored with a
+    // position that never changes, no position delta would ever refresh it and
+    // the next extremes would run out after a week.
+    const refreshMinutes =
+      typeof config.period === "number" && config.period > 0
+        ? config.period
+        : DEFAULT_REFRESH_PERIOD;
+    const refreshTimer = setInterval(updatePosition, refreshMinutes * 60 * 1000);
+    unsubscribes.push(() => clearInterval(refreshTimer));
   }
 
   return plugin;
