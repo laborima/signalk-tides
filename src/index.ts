@@ -405,10 +405,12 @@ export default function (app: ServerAPI): Plugin {
         : `Updated tide forecast from ${station.name}, ${Math.round(distance)} km away`;
     }
 
+    // Start half a day back so the previous extreme is included: clients
+    // interpolating the current height need the extremes on both sides of now.
     function forecastFor(predictor: Predictor): Forecast {
       const now = new Date();
       return predictor.getExtremesPrediction({
-        start: now,
+        start: new Date(now.getTime() - 12 * 60 * 60 * 1000),
         end: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
       });
     }
