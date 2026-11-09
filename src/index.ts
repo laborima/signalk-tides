@@ -17,6 +17,7 @@
 import { Context, Delta, MetaValue, Path, Plugin, Position, ServerAPI, Timestamp } from "@signalk/server-api";
 import { RequestHandler } from "express";
 import { createRoutes } from "@slackwater/api";
+import type { StationExtremesPrediction } from "@slackwater/engine";
 import { findStation, nearestStation, stationsNear } from "slackwater";
 import {
   MAX_STATION_KM,
@@ -27,16 +28,21 @@ import {
   timeToNextExtreme,
 } from "./calculations.js";
 import FileCache from "./cache.js";
+import { toResourceCollection } from "./adapter.js";
+import { createTableSource, sourceSchemaProperties } from "./sources/index.js";
+import type { SourceConfig, TableForecast, TablePredictor } from "./sources/types.js";
 import { withVesselPosition } from "./middleware.js";
 import {
   PLOTTER_EXTENSION_ID,
   plotterExtensionManifest,
 } from "./plotter-extension.js";
 
-type Predictor = Awaited<ReturnType<typeof findStation>>;
-type Forecast = ReturnType<Predictor["getExtremesPrediction"]>;
+type StationPredictor = Awaited<ReturnType<typeof findStation>>;
+// A Slackwater station, or a tide table from a local file or the SHOM
+type Predictor = StationPredictor | TablePredictor;
+type Forecast = StationExtremesPrediction | TableForecast;
 
-interface Config {
+interface Config extends SourceConfig {
   defaultStation?: string;
 }
 
@@ -45,6 +51,7 @@ interface Config {
 const UPDATE_INTERVAL = 60 * 1000; // 1 minute
 const API_PATH = "/signalk/v2/api/tides";
 const COMPENSATED_DEPTH_PATH = "environment.depth.belowChartDatum" as Path;
+const COEFFICIENT_PATH = "environment.tide.coefficient" as Path;
 
 const TIDE_PATHS = [
   "environment.tide.stationName",
@@ -57,6 +64,7 @@ const TIDE_PATHS = [
   "environment.tide.timeHigh",
   "environment.tide.heightLow",
   "environment.tide.timeLow",
+  COEFFICIENT_PATH,
 ] as Path[];
 
 // Tide heights are water levels, so clients should show them in the user's
@@ -95,6 +103,7 @@ export default function (app: ServerAPI): Plugin {
       title: "Tides",
       type: "object",
       properties: {
+        source: sourceSchemaProperties.source,
         defaultStation: {
           type: "string",
           title: "Default tide station",
@@ -103,6 +112,11 @@ export default function (app: ServerAPI): Plugin {
           default: "auto",
           oneOf: await defaultStationOptions(),
         },
+        period: sourceSchemaProperties.period,
+        localTidesPath: sourceSchemaProperties.localTidesPath,
+        localTidesTimezone: sourceSchemaProperties.localTidesTimezone,
+        localStationName: sourceSchemaProperties.localStationName,
+        shomApiKey: sourceSchemaProperties.shomApiKey,
       },
     }),
     start,
@@ -215,6 +229,11 @@ export default function (app: ServerAPI): Plugin {
       stopped = true;
     });
     const cache = new FileCache(app.getDataDirPath());
+    // Null for Slackwater, the default
+    const tableSource = createTableSource(config, {
+      debug: (message) => app.debug(message),
+      error: (message) => app.error(message),
+    });
 
     // Mount the Slackwater API, with vessel/default resolved to the configured
     // default station (or the nearest one).
@@ -237,10 +256,19 @@ export default function (app: ServerAPI): Plugin {
           if (!predictor) {
             throw new Error("No position or default station available");
           }
+          if (tableSource && isTablePredictor(predictor)) {
+            return toResourceCollection(predictor, tableSource.id) as unknown as Record<string, unknown>;
+          }
           return forecastFor(predictor) as unknown as Record<string, unknown>;
         },
-        getResource(): never {
-          throw new Error("Not implemented");
+        async getResource(id: string) {
+          const predictor = tableSource ? await resolvePredictor() : null;
+          if (!tableSource || !predictor || !isTablePredictor(predictor)) {
+            throw new Error("Not implemented");
+          }
+          const feature = toResourceCollection(predictor, tableSource.id)[id];
+          if (!feature) throw new Error(`Tide resource not found: ${id}`);
+          return feature as unknown as Record<string, unknown>;
         },
         setResource(): never {
           throw new Error("Not implemented");
@@ -314,6 +342,15 @@ export default function (app: ServerAPI): Plugin {
     async function resolvePredictor(
       report = reportLookupFailure,
     ): Promise<Predictor | null> {
+      if (tableSource) {
+        try {
+          return await tableSource.resolve(lastPosition);
+        } catch (e: unknown) {
+          report(`Could not load tides from ${tableSource.title}: ${errorMessage(e)}`);
+          return null;
+        }
+      }
+
       let failed = false;
       if (config.defaultStation && config.defaultStation !== "auto") {
         try {
@@ -358,6 +395,9 @@ export default function (app: ServerAPI): Plugin {
     }
 
     function forecastStatus({ station, distance }: Forecast) {
+      if (tableSource) {
+        return `Updated tide forecast from ${station.name} (${tableSource.title})`;
+      }
       return distance === undefined
         ? "Updated tide forecast"
         : `Updated tide forecast from ${station.name}, ${Math.round(distance)} km away`;
@@ -520,6 +560,10 @@ export default function (app: ServerAPI): Plugin {
         .slice(0, 2);
 
       const heightNow = lastPredictor.getWaterLevelAtTime({ time: now }).level;
+      // Only tide tables give the French tidal coefficient
+      const coefficient = isTablePredictor(lastPredictor)
+        ? lastPredictor.getCoefficientAtTime({ time: now })
+        : null;
 
       const state = tideStateAt(lastForecast.extremes, now);
       const secondsToNextExtreme = timeToNextExtreme(
@@ -566,6 +610,9 @@ export default function (app: ServerAPI): Plugin {
                       value: secondsToNextExtreme,
                     },
                   ]
+                : []),
+              ...(coefficient !== null
+                ? [{ path: COEFFICIENT_PATH, value: coefficient }]
                 : []),
               ...nextTides.flatMap(({ label, time, level }) => {
                 return [
@@ -615,6 +662,13 @@ export default function (app: ServerAPI): Plugin {
                 },
               },
               {
+                path: COEFFICIENT_PATH,
+                value: {
+                  description:
+                    "French tidal coefficient (20 to 120) of the nearest high water, from tide table sources only",
+                },
+              },
+              {
                 path: "environment.tide.timeToNextExtreme" as Path,
                 value: {
                   units: "s",
@@ -644,11 +698,15 @@ export default function (app: ServerAPI): Plugin {
   return plugin;
 }
 
+function isTablePredictor(predictor: Predictor): predictor is TablePredictor {
+  return "getCoefficientAtTime" in predictor;
+}
+
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-function stationTitle(station: Predictor): string {
+function stationTitle(station: StationPredictor): string {
   const where = [station.region, station.country].filter(Boolean).join(", ");
   const distance =
     station.distance != null ? ` — ${station.distance.toFixed(1)} km` : "";

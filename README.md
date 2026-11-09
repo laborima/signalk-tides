@@ -25,6 +25,7 @@ It publishes the following [tide data](https://signalk.org/specification/1.7.0/d
 * `environment.tide.datum` — the vertical datum the tide heights and `environment.depth.belowChartDatum` are measured from, such as `MLLW`, `LAT` or `CD`. This is the tide station's chart datum. For the rare station without one it is `MSL`, and only the tide heights use it.
 * `environment.tide.state` — tide trend, `rising` or `falling`
 * `environment.tide.timeToNextExtreme` — seconds until the next high or low water
+* `environment.tide.coefficient` — French tidal coefficient of the nearest high water, with the `local` and `shom` sources only
 
 For each `environment.depth.belowSurface` reading it publishes `environment.depth.belowChartDatum`, the depth below the datum named in `environment.tide.datum`. Charts for an area normally use the same datum as its tide stations, so you can compare this depth with charted soundings. That comparison doesn't hold when the station is far away or in another country's waters. The depth is `null` when the station has no chart datum.
 
@@ -62,6 +63,24 @@ $ curl http://localhost:3000/signalk/v2/api/resources/tides
    ]
 }
 ```
+
+### Tide table sources
+
+By default (`"source": "slackwater"`) everything above comes from Slackwater. Two other sources read published tide tables instead, and also give the French tidal coefficient:
+
+* `local` reads monthly files named `MM_YYYY.json` from `localTidesPath`, in the SHOM format: `{ "2026-11-09": [["tide.high", "04:05", "5.94m", "84"], ["tide.low", "10:31", "1.43m", "---"]] }`. Times are local to the station, in `localTidesTimezone` or, when it is empty, the timezone of the nearest Slackwater station. `localStationName` overrides the published name, which defaults to the folder name. It works without a position.
+* `shom` loads the tables of the SHOM harbor nearest the vessel, with `shomApiKey`.
+
+```json
+{ "source": "local", "localTidesPath": "/home/node/.signalk/tides/larochelle", "period": 60 }
+```
+
+With these sources:
+
+* the height between two extremes follows a half cosine, the smooth form of the Rule of Twelfths, computed on absolute times so it stays right across midnight;
+* `environment.tide.coefficient` gives the coefficient of the nearest high water;
+* the `tides` resource returns one GeoJSON feature per day, keyed `urn:mrn:signalk:uuid:tides:<station>:<YYYY-MM-DD>`, whose `properties.extremes` are `{ "type": "High", "value": 5.89, "time": "2026-11-09T15:22:00.000Z", "coefficient": 84 }`;
+* the Tides API routes and the web app still show Slackwater predictions.
 
 ### Chart plotter widget
 
